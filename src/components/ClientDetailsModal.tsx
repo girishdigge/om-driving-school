@@ -1,0 +1,162 @@
+import React, { useState } from 'react';
+import { Button } from '@/components/ui/button';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
+import { Eye, Plus } from 'lucide-react';
+import { Client, Ride } from '@/types/client';
+import { PersonalInfoCard } from './client/PersonalInfoCard';
+import { PackageInfoCard } from './client/PackageInfoCard';
+import { LicenseStatusCard } from './client/LicenseStatusCard';
+import { RideProgressCard } from './client/RideProgressCard';
+import { RideHistoryCard } from './client/RideHistoryCard';
+import { AdditionalNotesCard } from './client/AdditionalNotesCard';
+import { PaymentDialog } from './PaymentDialog';
+import { usePayments } from '@/hooks/usePayments';
+import { useQueryClient, useQuery } from '@tanstack/react-query';
+import { Ride as CanonicalRide } from '@/hooks/useRides';
+import { Driver } from '@/types/driver';
+
+interface ClientDetailsModalProps {
+  client: Client | null;
+  isOpen: boolean;
+  onClose: () => void;
+}
+
+export const ClientDetailsModal = ({
+  client,
+  isOpen,
+  onClose,
+}: ClientDetailsModalProps) => {
+  const { getPaymentsByAdmission, refetch } = usePayments();
+  const [showPaymentDialog, setShowPaymentDialog] = useState(false);
+  const queryClient = useQueryClient();
+
+  // Read the canonical Ride[] that useRides already placed in the cache.
+  // The cache value is { rides: CanonicalRide[], totalRideCount: number } —
+  // we only need the rides array here for filtering.
+  const ridesCache = queryClient.getQueryData<{ rides: CanonicalRide[]; totalRideCount: number }>(['rides']);
+  const allRides = ridesCache?.rides ?? [];
+
+  // Subscribe to ['drivers'] so this component re-renders when useDrivers
+  // delivers its data. useDrivers (mounted in DashboardOverview, RideManager,
+  // etc.) is the sole fetch owner — it populates this cache entry.
+  // enabled: false means this observer never fires a network request;
+  // it only reads and subscribes to the existing cache. When useDrivers
+  // updates ['drivers'], React Query notifies all observers including this
+  // one, triggering a re-render with the fresh driver list.
+  const { data: allDrivers = [] } = useQuery<Driver[]>({
+    queryKey: ['drivers'],
+    queryFn: () => Promise.resolve([] as Driver[]),
+    enabled: false,
+  });
+  const driverById = new Map(allDrivers.map((d) => [d.id, d.name]));
+
+  // Filter to this client's rides using client_id (with legacy client_name fallback).
+  // driverName is resolved HERE from the current driver map, not from the stale
+  // value baked into the rides cache when the queryFn ran (which may have seen
+  // drivers = [] and permanently written 'Unknown').
+  const rideHistory: Ride[] = client
+    ? allRides
+        .filter((r) => {
+          if (r.client_id != null) return r.client_id === client.id;
+          // Legacy rides that pre-date client_id population
+          return r.clientName === client.name && r.client_id == null;
+        })
+        .map((r) => ({
+          id: r.id,
+          date: r.date,           // already a Date — no re-construction
+          time: r.time,
+          status: r.status,
+          // Resolve from live driver map; fall back to cached value if drivers
+          // are genuinely absent (e.g. network error), then to 'Unknown'.
+          driverName: r.driverId
+            ? (driverById.get(r.driverId) ?? r.driverName)
+            : r.driverName,
+          car: r.car,
+        }))
+    : [];
+
+  if (!client) return null;
+
+  const existingPayments = getPaymentsByAdmission(client.id);
+  const totalPaid = existingPayments.reduce(
+    (sum, payment) => sum + payment.amount,
+    0
+  );
+  const remainingBalance = client.fees - totalPaid;
+
+  return (
+    <Dialog open={isOpen} onOpenChange={onClose}>
+      <DialogContent className='w-[95vw] max-w-4xl h-[95vh] max-h-[95vh] overflow-hidden flex flex-col p-0 pt-2 sm:p-6 [&>button]:z-50'>
+        {/* Mobile Header - Fixed */}
+        <DialogHeader className='flex-shrink-0 px-4 py-4 sm:px-0 sm:py-0 border-b sm:border-b-0 bg-white sticky top-0 z-40'>
+          <div className='flex flex-col sm:flex-row sm:items-center justify-between gap-3 sm:gap-0 pr-10 sm:pr-14'>
+            <div className='flex-1 min-w-0'>
+              <DialogTitle className='flex items-center gap-2 text-base sm:text-lg'>
+                <Eye className='w-4 h-4 sm:w-5 sm:h-5 flex-shrink-0' />
+                <span className='truncate'>Client Details - {client.name}</span>
+              </DialogTitle>
+              <DialogDescription className='text-xs sm:text-sm mt-1'>
+                Complete information and ride history for this client
+              </DialogDescription>
+            </div>
+
+            {/* Action Buttons */}
+            <div className='flex items-center gap-2 flex-shrink-0'>
+              {totalPaid < client.fees && (
+                <Button
+                  onClick={() => setShowPaymentDialog(true)}
+                  size='sm'
+                  className='bg-green-600 hover:bg-green-700 text-xs sm:text-sm px-2 sm:px-3 relative z-30'
+                >
+                  <Plus className='w-3 h-3 sm:w-4 sm:h-4 mr-1' />
+                  <span className='hidden xs:inline'>Add Payment</span>
+                  <span className='xs:hidden'>Add Payment</span>
+                </Button>
+              )}
+            </div>
+          </div>
+        </DialogHeader>
+
+        {/* Scrollable Content */}
+        <div className='flex-1 overflow-y-auto px-4 sm:px-0'>
+          <div className='space-y-4 sm:space-y-6 py-4 sm:py-0'>
+            <PersonalInfoCard client={client} />
+            <PackageInfoCard client={client} totalPaid={totalPaid} />
+            <LicenseStatusCard client={client} />
+            <RideProgressCard client={client} />
+            <RideHistoryCard rideHistory={rideHistory} />
+            {client.additionalNotes && (
+              <AdditionalNotesCard notes={client.additionalNotes} />
+            )}
+          </div>
+        </div>
+
+        {/* Desktop Close Button - Fixed at bottom */}
+        <div className='hidden sm:flex justify-end pt-4 border-t flex-shrink-0'>
+          <Button variant='outline' onClick={onClose}>
+            Close
+          </Button>
+        </div>
+
+        {/* Mobile Bottom Padding */}
+        <div className='h-4 sm:hidden flex-shrink-0' />
+      </DialogContent>
+
+      <PaymentDialog
+        isOpen={showPaymentDialog}
+        onClose={() => setShowPaymentDialog(false)}
+        admissionId={client.id}
+        studentName={client.name}
+        existingPayments={existingPayments}
+        remainingBalance={remainingBalance}
+        onPaymentAdded={refetch}
+      />
+    </Dialog>
+  );
+};
