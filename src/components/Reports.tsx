@@ -2,7 +2,7 @@
 import React, { useEffect, useState } from 'react';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
-import { supabase } from '@/integrations/supabase/client';
+import { apiClient } from '@/lib/api/client';
 import { toast } from 'sonner';
 // Using regular HTML table elements instead of shadcn table components
 import {
@@ -74,7 +74,7 @@ const MobileAdmissionCard: React.FC<{ admission: AdmissionRow }> = ({
           </div>
           <span
             className={`px-2 py-1 rounded-full text-xs font-medium border ${getStatusColor(
-              admission.status
+              admission.status,
             )}`}
           >
             {admission.status}
@@ -157,56 +157,73 @@ export const Reports: React.FC = () => {
   };
 
   useEffect(() => {
+    let cancelled = false;
+
     async function fetchAdmissionsWithRides() {
       setLoading(true);
-      // 1. Fetch all admissions
-      const { data: admissionsData, error } = await supabase
-        .from('admissions')
-        .select(
-          'id, student_name, admission_date, status, contact, license_type, fees, advance_amount, duration, rides_completed, total_rides'
-        )
-        .order('admission_date', { ascending: false });
 
-      if (error) {
-        toast.error('Could not fetch admissions data');
-        setAdmissions([]);
-        setLoading(false);
-        return;
-      }
-      // 2. Fetch rides, group by client_id
-      const { data: ridesData, error: ridesError } = await supabase
-        .from('rides')
-        .select('client_id, date');
+      try {
+        const [admissionsData, ridesResponse] = await Promise.all([
+          apiClient.getAdmissions(),
+          apiClient.getRides(),
+        ]);
 
-      const ridesMap: Record<string, string[]> = {};
-      if (ridesData && !ridesError) {
+        // The unfiltered rides API may return { rides, totalCount }.
+        const ridesData = Array.isArray(ridesResponse)
+          ? ridesResponse
+          : (ridesResponse?.rides ?? []);
+
+        const ridesMap: Record<string, string[]> = {};
+
         for (const ride of ridesData) {
           if (ride.client_id && ride.date) {
-            if (!ridesMap[ride.client_id]) ridesMap[ride.client_id] = [];
-            ridesMap[ride.client_id].push(ride.date);
+            (ridesMap[ride.client_id] ??= []).push(String(ride.date));
           }
         }
+
+        const rows: AdmissionRow[] = (admissionsData ?? [])
+          .map((adm: any) => ({
+            id: adm.id,
+            student_name: adm.student_name,
+            admission_date: adm.admission_date ?? null,
+            status: adm.status ?? '',
+            contact: adm.contact ?? '',
+            license_type: adm.license_type ?? '',
+            fees: Number(adm.fees ?? 0),
+            advance_amount: Number(adm.advance_amount ?? 0),
+            duration: adm.duration ?? '',
+            rides_completed: Number(adm.rides_completed ?? 0),
+            total_rides: Number(adm.total_rides ?? 0),
+            ride_dates: (ridesMap[adm.id] ?? []).sort().join(', '),
+          }))
+          .sort((a, b) =>
+            String(b.admission_date ?? '').localeCompare(
+              String(a.admission_date ?? ''),
+            ),
+          );
+
+        if (!cancelled) {
+          setAdmissions(rows);
+        }
+      } catch (error) {
+        console.error('Failed to load admissions reports:', error);
+        toast.error('Could not fetch admissions reports');
+
+        if (!cancelled) {
+          setAdmissions([]);
+        }
+      } finally {
+        if (!cancelled) {
+          setLoading(false);
+        }
       }
-
-      const rows: AdmissionRow[] = admissionsData.map((adm: any) => ({
-        id: adm.id,
-        student_name: adm.student_name,
-        admission_date: adm.admission_date,
-        status: adm.status,
-        contact: adm.contact,
-        license_type: adm.license_type,
-        fees: Number(adm.fees),
-        advance_amount: Number(adm.advance_amount),
-        duration: adm.duration,
-        rides_completed: adm.rides_completed,
-        total_rides: adm.total_rides,
-        ride_dates: (ridesMap[adm.id] || []).sort().join(', '),
-      }));
-
-      setAdmissions(rows);
-      setLoading(false);
     }
-    fetchAdmissionsWithRides();
+
+    void fetchAdmissionsWithRides();
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   // Filter according to tab
@@ -216,7 +233,7 @@ export const Reports: React.FC = () => {
       : admissions.filter(
           (a) =>
             a.status?.toLowerCase() === 'completed' ||
-            a.status?.toLowerCase() === 'terminated'
+            a.status?.toLowerCase() === 'terminated',
         );
 
   const downloadCSV = () => {
@@ -242,7 +259,7 @@ export const Reports: React.FC = () => {
             if (value === null || value === undefined) return '';
             return `"${String(value).replace(/"/g, '""')}"`;
           })
-          .join(',')
+          .join(','),
       ),
     ];
     const blob = new Blob([csvRows.join('\r\n')], { type: 'text/csv' });
